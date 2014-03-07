@@ -1,3 +1,5 @@
+# -*- coding:utf-8 -*-
+
 """
 utilizations for amr graph representaion
 
@@ -6,8 +8,40 @@ utilizations for amr graph representaion
 """
 
 from collections import defaultdict
+import re
+
+def trim_concepts(line):
+    """
+    quote all the string literals
+    """
+    pattern = re.compile('(:name\s*\(n / name\s*:op\d)\s*\(([^:)]+)\)\)')
+    def quote(match):
+        return match.group(1)+' "'+ match.group(2) + '")' 
+    return pattern.sub(quote,line)
 
 
+class StrLiteral(unicode):
+    def __str__(self):
+        return '"%s"' % "".join(self)
+
+    def __repr__(self):
+            return "".join(self)
+
+class SpecialValue(str):
+        pass
+
+class Quantity(str):
+        pass
+
+class Polarity(str):
+        pass
+
+class Literal(str):
+    def __str__(self):
+        return "'%s" % "".join(self)
+
+    def __repr__(self):
+            return "".join(self)
 
 class ListMap(defaultdict):
     '''
@@ -75,4 +109,92 @@ class ListMap(defaultdict):
     def __reduce__(self):
         t = defaultdict.__reduce__(self)
         return (t[0], ()) + t[2:]
+
+    #def __str__(self):
+    #    print map(lambda k: [k.encode("utf8"),','.join(map(lambda v:v.encode("utf8"),self[k]))],self)
+    #     return str(map(lambda k: [k.encode("utf8"),','.join(map(lambda v:v,self[k]))],self))
+# Lexer
+class Lexer(object):
+    """
+    A simple generic lexer using Python re, that accepts a list of token
+    definitions and ignores whitespaces.
+    """
+    def __init__(self, rules):
+        """
+        Initialize a new Lexer object using a set of lexical rules. 
+
+        @type rules: A list of tuples (lextype, regex) where lextype is a 
+        string identifying the lexical type of the token and regex is a python
+        regular expression string. The order of tuples in the list matters.
+        """
+        self.tokenre = self.make_compiled_regex(rules)
+        self.whitespacere = re.compile('[\s]*', re.MULTILINE)
+
+    def make_compiled_regex(self, rules):
+        regexstr =  '|'.join('(?P<%s>%s)' % (name, rule) for name, rule in rules)
+        return re.compile(regexstr)
+
+    def lex(self, s):
+        """
+        Perform the lexical scanning on a string and yield a (type, token, position)
+        triple at a time. Whitespaces are skipped automatically.  
+        This is a generator, so lexing is performed lazily. 
+        """
+        position = 0
+        s = s.strip()
+        while position < len(s):
+
+            # Skip white spaces
+            match = self.whitespacere.match(s, position)
+            if match: 
+                position = match.end()
+    
+            match = self.tokenre.match(s, position)
+            if not match:
+                raise LexerError, "Could not tokenize '%s'" % re.escape(s[position:])
+            position = match.end()
+            token = match.group(match.lastgroup)
+            type = match.lastgroup
+            yield type, token, position
+
+
+class LexTypes:
+    """
+    Definitions of lexical types returned by the lexer.
+    """
+    LPAR = "LPAR" 
+    RPAR = "RPAR"
+    COMMA = "COMMA" 
+    SLASH = "SLASH" 
+    EDGELABEL = "EDGELABEL" 
+    STRLITERAL = "STRLITERAL" 
+    IDENTIFIER = "IDENTIFIER" 
+    LITERAL =  "LITERAL"
+    QUANTITY = "QUANTITY"
+
+
+class Node():
+
+    node_id = 0     #static counter, unique for each node
+    mapping_table = {}  # old new index mapping table
+
+    def __init__(self, trace, node_label, firsthit, leaf, depth):
+        """
+        initialize a node in the graph
+        here a node keeps record of trace i.e. from where the node is reached (the edge label)
+        so nodes with same other attributes may have different trace
+        """
+        self.trace = trace
+        self.node_label = node_label
+        self.firsthit = firsthit
+        self.leaf = leaf
+        self.depth = depth
+        Node.node_id += 1                
+        
+    def __str__(self):
+        return str((self.trace, self.node_label, self.depth))
+        
+    def __repr__(self):
+        return str((self.trace, self.node_label, self.depth))
+
 

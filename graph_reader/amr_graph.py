@@ -1,3 +1,4 @@
+#!/usr/bin/python
 # -*- coding:utf-8 -*-
 
 '''
@@ -9,92 +10,13 @@ A hypergraph representation for amr.
 from collections import defaultdict
 from util import *
 import re,sys
+from optparse import OptionParser
 
 # Error definitions
 class LexerError(Exception):
     pass
 class ParserError(Exception):
     pass
-
-# Lexer
-class Lexer(object):
-    """
-    A simple generic lexer using Python re, that accepts a list of token
-    definitions and ignores whitespaces.
-    """
-    def __init__(self, rules):
-        """
-        Initialize a new Lexer object using a set of lexical rules. 
-
-        @type rules: A list of tuples (lextype, regex) where lextype is a 
-        string identifying the lexical type of the token and regex is a python
-        regular expression string. The order of tuples in the list matters.
-        """
-        self.tokenre = self.make_compiled_regex(rules)
-        self.whitespacere = re.compile('[\s]*', re.MULTILINE)
-
-    def make_compiled_regex(self, rules):
-        regexstr =  '|'.join('(?P<%s>%s)' % (name, rule) for name, rule in rules)
-        return re.compile(regexstr)
-
-    def lex(self, s):
-        """
-        Perform the lexical scanning on a string and yield a (type, token, position)
-        triple at a time. Whitespaces are skipped automatically.  
-        This is a generator, so lexing is performed lazily. 
-        """
-        position = 0
-        s = s.strip()
-        while position < len(s):
-
-            # Skip white spaces
-            match = self.whitespacere.match(s, position)
-            if match: 
-                position = match.end()
-    
-            match = self.tokenre.match(s, position)
-            if not match:
-                raise LexerError, "Could not tokenize '%s'" % re.escape(s[position:])
-            position = match.end()
-            token = match.group(match.lastgroup)
-            type = match.lastgroup
-            yield type, token, position
-
-
-class LexTypes:
-    """
-    Definitions of lexical types returned by the lexer.
-    """
-    LPAR = "LPAR" 
-    RPAR = "RPAR"
-    COMMA = "COMMA" 
-    SLASH = "SLASH" 
-    EDGELABEL = "EDGELABEL" 
-    STRLITERAL = "STRLITERAL" 
-    IDENTIFIER = "IDENTIFIER" 
-    LITERAL =  "LITERAL"
-    QUANTITY = "QUANTITY"
-
-
-class Node():
-    
-    def __init__(self, trace, node_label, firsthit, leaf, depth):
-        """
-        initialize a node in the graph
-        here a node keeps record of trace i.e. from where the node is reached (the edge label)
-        so nodes with same other attributes may have different trace
-        """
-        self.trace = trace
-        self.node_label = node_label
-        self.firsthit = firsthit
-        self.leaf = leaf
-        self.depth = depth
-    
-    def __str__(self):
-        return str((self.trace, self.node_label, self.depth))
-        
-    def __repr__(self):
-        return str((self.trace, self.node_label, self.depth))
 
 class AMR(defaultdict):
     """
@@ -134,6 +56,8 @@ class AMR(defaultdict):
         amr = cls()
         stack = []
         state = 0
+        node_idx = 0; # sequential new node index
+        mapping_table = {};  # old new index mapping table
 
         lex_rules = [
             ("LPAR", '\('),
@@ -141,18 +65,23 @@ class AMR(defaultdict):
             ("COMMA",','), 
             ("SLASH",'/'),
             ("EDGELABEL",":[^\s()]+"),
-            ("STRLITERAL",'"[^"]+"'),
+            ("STRLITERAL",u'"[^"]+"|\u201c[^\u201d]+\u201d'),
             ("LITERAL","'[^\s(),]+"),
-            ("IDENTIFIER","[^\s()]+"), #no blank within characters
             ("QUANTITY","[0-9][0-9Ee^+\-\.,:]*"),
+            ("IDENTIFIER","[^\s()]+"), #no blank within characters
+            ("POLARITY","\s\-\s")
         ] 
         
         token_re = make_compiled_regex(lex_rules)
         #lexer = Lexer(lex_rules)
-        
+
         for match in token_re.finditer(amr_string):
             token = match.group()
             type = match.lastgroup
+            
+            #if type == "STRLITERAL":
+            #    import pdb
+            #    pdb.set_trace()
 
             #print token.strip(),type
             if state == 0:
@@ -164,7 +93,13 @@ class AMR(defaultdict):
                 if type == "IDENTIFIER":
                     stack.append((PNODE,token.strip(),None))
                     state = 2
-                else: raise ParserError , "Unexpected token %s"%(token)
+                elif type == "QUANTITY":
+                    stack.append((PNODE,Quantity(token.strip()),None))
+                    state = 2
+                elif type == "STRLITERAL":
+                    stack.append((PNODE,StrLiteral(token.strip()),None))
+                    state = 2
+                else: raise ParserError , "Unexpected token %s"%(token.encode('utf8'))
 
             elif state == 2:
                 if type == "SLASH":
@@ -175,7 +110,18 @@ class AMR(defaultdict):
                 elif type == "RPAR":
                     forgetme, parentnodelabel, parentconcept = stack.pop()
                     assert forgetme == PNODE
+                    assert parentconcept == None
+                    
+                    if parentnodelabel in mapping_table:
+                        parentnodelabel = mapping_table[parentnodelabel]
+                    else:
+                        parentconcept = parentnodelabel
+                        parentnodelabel = node_idx 
+                        amr.node_to_concepts[parentnodelabel] = parentconcept
+                        node_idx += 1
+
                     foo = amr[parentnodelabel]
+
                     if stack:
                         stack.append((CNODE,parentnodelabel,parentconcept))
                         state = 6
@@ -201,7 +147,9 @@ class AMR(defaultdict):
                     forgetme, parentnodelabel, parentconcept = stack.pop()
                     assert forgetme == PNODE
                     foo = amr[parentnodelabel] # add only the node
-                    amr.node_to_concepts[parentnodelabel] = parentconcept
+                    print state,parentnodelabel,parentconcept
+                    if parentconcept is not None:
+                        amr.node_to_concepts[parentnodelabel] = parentconcept
                     
                     if stack:
                         stack.append((CNODE,parentnodelabel,parentconcept))
@@ -209,19 +157,22 @@ class AMR(defaultdict):
                     else:
                         amr.roots.append(parentnodelabel)
                         state = 0
-                else: raise ParserError, "Unexpected token %s"%(token)
+                else: raise ParserError, "Unexpected token %s"%(token.encode('utf8'))
                 
             elif state == 5:
                 if type == "LPAR":
                     state = 1
                 elif type == "QUANTITY":
-                    stack.append((CNODE,token,None))
+                    stack.append((CNODE,Quantity(token),None))
                     state = 6
                 elif type == "STRLITERAL":
-                    stack.append((CNODE,token[1:-1],None))
+                    stack.append((CNODE,StrLiteral(token[1:-1]),None))
                     state = 6
                 elif type == "LITERAL":
                     stack.append((CNODE,token[1:],None))
+                    state = 6
+                elif type == "POLARITY":
+                    stack.append((CNODE,Polarity(token.strip()),None))
                     state = 6
                 elif type == "IDENTIFIER":
                     stack.append((CNODE,token,None))
@@ -247,13 +198,58 @@ class AMR(defaultdict):
                         edges.append((edgelabel,children))
                     
                     forgetme,parentnodelabel,parentconcept = stack.pop()
-                    amr.node_to_concepts[parentnodelabel] = parentconcept
+                    print state,parentnodelabel,parentconcept
+
+                    #check for annotation error
+                    if parentnodelabel in amr.node_to_concepts.keys(): 
+                        #concept has been defined by the children, 
+                        #then they must have different concepts, otherwise the children's concepts should be None
+                        #(coreference)
+                        if amr.node_to_concepts[parentnodelabel] == parentconcept:
+                            sys.stderr.write("Wrong annotation format: Revisited concepts %s should be ignored.\n" % parentconcept)
+                        else:
+                            sys.stderr.write("Wrong annotation format: Different concepts %s and %s have same node label(index)\n" % (amr.node_to_concepts[parentnodelabel],parentconcept))
+                            parentnodelabel = parentnodelabel + "1"
+
+                    if not isinstance(parentnodelabel,(Quantity,Polarity,StrLiteral)):                                       
+                        # graph node rebuild
+                        if parentconcept is not None:
+                            amr.node_to_concepts[node_idx] = parentconcept
+                            mapping_table[parentnodelabel] = node_idx
+                            parentnodelabel = node_idx
+                            node_idx += 1
+                        else:
+                            # not revisiting and concept is None
+                            if parentnodelabel not in mapping_table:
+                                amr.node_to_concepts[node_idx] = parentnodelabel
+                                parentnodelabel = node_idx
+                                node_idx += 1
+                            else: #revisiting 
+                                parentnodelabel = mapping_table[parentnodelabel]
+
+
                     for edgelabel,children in edges:
                         hypertarget = []
                         for node, concept in children:
-                            if node is not None:
-                                if concept and (not node in amr.node_to_concepts or concept is not None):
-                                    amr.node_to_concepts[node] = concept
+                            if node is not None and not isinstance(node,(Quantity,Polarity,StrLiteral)):
+                                if concept and not node in amr.node_to_concepts:
+                                    print "CNODE",state,node,concept
+                                    if node in mapping_table:
+                                        node = mapping_table[node]
+                                    else:
+                                        amr.node_to_concepts[node_idx] = concept
+                                        mapping_table[node] = node_idx
+                                        node = node_idx
+                                        node_idx += 1
+                                elif concept is None and not node in amr.node_to_concepts:
+                                    print "CNODE",state,node,concept
+                                    if node in mapping_table:
+                                        node = mapping_table[node]
+                                    else:
+                                        amr.node_to_concepts[node_idx] = node
+                                        node = node_idx
+                                        node_idx += 1
+
                             hypertarget.append(node)
                         hyperchild = tuple(hypertarget)
                         amr._add_triple(parentnodelabel,edgelabel,hyperchild)
@@ -281,13 +277,58 @@ class AMR(defaultdict):
                         edges.append((edgelabel,children))
                     
                     forgetme,parentnodelabel,parentconcept = stack.pop()
-                    amr.node_to_concepts[parentnodelabel] = parentconcept
+                    print "PNODE",state,parentnodelabel,parentconcept
+                    
+                    #check for annotation error
+                    if parentnodelabel in amr.node_to_concepts.keys(): 
+                        #concept has been defined by the children, 
+                        #then they must have different concepts, otherwise the children's concepts should be None
+                        #(coreference)
+                        if amr.node_to_concepts[parentnodelabel] == parentconcept:
+                            sys.stderr.write("Wrong annotation format: Revisited concepts %s should be ignored.\n" % parentconcept)
+                        else:
+                            sys.stderr.write("Wrong annotation format: Different concepts %s and %s have same node label(index)\n" % (amr.node_to_concepts[parentnodelabel],parentconcept))
+                            parentnodelabel = parentnodelabel + "1"
+                            
+                    if not isinstance(parentnodelabel,(Quantity,Polarity,StrLiteral)):
+                    # graph node rebuild
+                        if parentconcept is not None:
+                            amr.node_to_concepts[node_idx] = parentconcept
+                            mapping_table[parentnodelabel] = node_idx
+                            parentnodelabel = node_idx
+                            node_idx += 1
+                        else:
+                            # not revisiting and concept is None
+                            if parentnodelabel not in mapping_table:
+                                amr.node_to_concepts[node_idx] = parentnodelabel
+                                parentnodelabel = node_idx
+                                node_idx += 1
+                            else: #revisiting 
+                                parentnodelabel = mapping_table[parentnodelabel]
+                                
+
                     for edgelabel,children in edges:
                         hypertarget = []
                         for node, concept in children:
-                            if node is not None:
-                                if concept and (not node in amr.node_to_concepts or concept is not None):
-                                    amr.node_to_concepts[node] = concept
+                            if node is not None and not isinstance(node,(Quantity,Polarity,StrLiteral)):
+                                if concept and not node in amr.node_to_concepts:
+                                    print "CNODE",state,node,concept
+                                    if node in mapping_table:
+                                        node = mapping_table[node]
+                                    else:
+                                        amr.node_to_concepts[node_idx] = concept
+                                        mapping_table[node] = node_idx
+                                        node = node_idx
+                                        node_idx += 1
+                                elif concept is None and not node in amr.node_to_concepts:
+                                    print "CNODE",state,node,concept
+                                    if node in mapping_table:
+                                        node = mapping_table[node]
+                                    else:
+                                        amr.node_to_concepts[node_idx] = node
+                                        node = node_idx
+                                        node_idx += 1
+                                
                             hypertarget.append(node)
                         hyperchild = tuple(hypertarget)
                         amr._add_triple(parentnodelabel,edgelabel,hyperchild)
@@ -303,7 +344,7 @@ class AMR(defaultdict):
                 elif type == "EDGELABEL":
                     stack.append((EDGE,token[1:]))
                     state = 5
-                else: raise ParserError, "Unexpected token %s"%(token)
+                else: raise ParserError, "Unexpected token %s"%(token.encode('utf8'))
 
             elif state == 7:
                 if type == "IDENTIFIER":
@@ -313,6 +354,8 @@ class AMR(defaultdict):
                     state = 1
                 else: raise ParserError, "Unexpected token %s"%(token)
 
+        if state != 0 and stack: 
+            raise ParserError, "mismatched parenthesis"
         return amr
 
     def _add_triple(self, parent, relation, child, warn=sys.stderr):
@@ -330,7 +373,15 @@ class AMR(defaultdict):
             x = self[c]
             for rel, test in self[c].items():
                 if parent in test:
-                   if warn: warn.write("WARNING: (%s, %s, %s) produces a cycle with (%s, %s, %s)\n" % (parent, relation, child, c, rel, test))
+                   if warn:
+                       warn.write("WARNING: (%s, %s, %s) produces a cycle with (%s, %s, %s)\n" % (parent, relation, child, c, rel, test))
+                       #ATTENTION:maybe wrong, test may not have only one element, deal with it later
+                       concept1 = self.node_to_concepts[parent]
+                       concept2 = self.node_to_concepts[test[0]]
+                       print concept1,concept2
+                       if concept1 != concept2:
+                           warn.write("ANNOTATION ERROR: concepts %s and %s have same node label %s!" % (concept1, concepts2, parent))
+                       
                     #raise ValueError,"(%s, %s, %s) would produce a cycle with (%s, %s, %s)" % (parent, relation, child, c, rel, test)                     
 
         self[parent].append(relation, child)                
@@ -358,8 +409,10 @@ class AMR(defaultdict):
                 for n in next:
                     firsthit = not n in visited_nodes
                     leaf = False if self[n] else True
-                
+
                     node = Node(rel, n, firsthit, leaf, depth)
+                    
+                    #print self.node_to_concepts
                     all_nodes.append(node)
                     if n in visited_nodes:
                         continue
@@ -373,10 +426,84 @@ class AMR(defaultdict):
                             else:
                                 visited_edges.add((n,rel,child))
                                 stack.append((child,rel,depth+1))
-                                
+            Node.node_id = 0
+            Node.mapping_table = {}
             sequences.append(all_nodes)
         
         return sequences
+    def replace_node(self, h_idx, idx):
+        """for coreference, replace all occurrence of node idx to h_idx"""
+        visited_nodes = set()
+        visited_edges = set()
+        
+        for i,r in enumerate(self.roots[:]):
+            stack = [((r,),None,None)] #node,incoming edge and preceding node
+            
+            while stack:
+                next, rel, previous = stack.pop()
+                for n in next:
+                    if n == idx:
+                        if previous == None: # replace root
+                            self.roots[i] = h_idx
+                            break
+                        self[previous].replace(rel,(h_idx,))
+                    if n in visited_nodes:
+                        continue
+                    visited_nodes.add(n)
+                    for rel, child in reversed(self[n].items()):
+                        if not (n, rel, child) in visited_edges:
+                            if child in visited_nodes:
+                                stack.append((child,rel,n))
+                            else:
+                                visited_edges.add((n,rel,child))
+                                stack.append((child,rel,n))
+    def find_rel(self,h_idx,idx):
+        """find the relation between head_idx and idx"""
+        rels = []
+        for rel,child in self[h_idx].items():
+            print child,idx
+            if child == (idx,):
+                rels.append(rel)
+        return rels
+
+    def replace_head(self,old_head,new_head,KEEP_OLD=True):
+        """change the focus of current sub graph"""
+        for rel,child in self[old_head].items():
+            if child != (new_head,):
+                self[new_head].append(rel,child)
+        del self[old_head]
+        if KEEP_OLD:
+            foo = self[old_head]
+            self[new_head].append('NA',(old_head,))
+    
+    def replace_rel(self,h_idx,old_rel,new_rel):
+        """replace the h_idx's old_rel to new_rel"""
+        for v in self[h_idx].getall(old_rel):
+            self[h_idx].append(new_rel,v)
+        del self[h_idx][old_rel]
+        
+    def rebuild_index(self, node, sent_index_mapping=None):
+        """assign non-literal node a new unique node label; replace the 
+           original index with the new node id or sentence offset;
+           if we have been provided the sentence index mapping, we use the 
+           sentence offsets as new node label instead of the serialized node id.
+        """
+        if sent_index_mapping is None:
+            if node.node_label in self.node_to_concepts and self.node_to_concepts[node.node_label] is not None:
+                #update the node_to_concepts table 
+                self.node_to_concepts[Node.node_id] = self.node_to_concepts[node.node_label]
+                del self.node_to_concepts[node.node_label]
+                Node.mapping_table[node.node_label] = Node.node_id
+                node.node_label = Node.node_id 
+                
+            elif self.node_label not in node_to_concepts and self.node_label in Node.mapping_table:
+                new_label = Node.mapping_table[self.node_label]
+                self.node_label = new_label
+            else:
+                print Node.node_id,self.node_label
+                node_to_concepts[Node.node_id] = self.node_label
+                self.node_label = Node.node_id
+
             
     def to_amr_string(self):
         
@@ -400,35 +527,45 @@ class AMR(defaultdict):
                         amr_string += "%s"%((dep_rec-node.depth)*')')
                         dep_rec = node.depth
 
+                    
                     if not node.leaf:
                         if node.firsthit and node.node_label in self.node_to_concepts:
                             amr_string += "\n%s:%s (%s / %s"%(node.depth*"\t",node.trace,node.node_label,self.node_to_concepts[node.node_label])
                         else:
-                            amr_string += "\n%s:%s (%s"%(node.depth*"\t",node.trace,node.node_label)
-                           
+                            amr_string += "\n%s:%s %s"%(node.depth*"\t",node.trace,node.node_label)
+                            
                     else:
                         if node.firsthit and node.node_label in self.node_to_concepts:
                             amr_string += "\n%s:%s (%s / %s)"%(node.depth*"\t",node.trace,node.node_label,self.node_to_concepts[node.node_label])
                         else:
-                            amr_string += "\n%s:%s %s"%(node.depth*"\t",node.trace,node.node_label)
-
+                            if isinstance(node.node_label,StrLiteral):
+                                amr_string += '\n%s:%s "%s"'%(node.depth*"\t",node.trace,node.node_label)
+                            else:
+                                amr_string += "\n%s:%s %s"%(node.depth*"\t",node.trace,node.node_label)
+                            
             if dep_rec != 0:
                 amr_string += "%s"%((dep_rec)*')')
 
         return amr_string
 
 if __name__ == "__main__":
-    s = '''(a / and :op1(恶化 :ARG0(它) :ARG1(模式 :mod(开发)) :time (已经)) :op2(t / 堵塞 :ARG0(它) :ARG1(交通 :mod(局部)) :location(a1 / around :op1(出口))))'''
+
+    opt = OptionParser()
+    opt.add_option("-v", action="store_true", dest="verbose")
+    
+    (options, args) = opt.parse_args()
+
+    s = '''(a / and :op1(恶化 :ARG0(它) :ARG1(模式 :mod(开发)) :time (已经)) :op2(t / 堵塞 :ARG0(它) :ARG1(交通 :mod(局部)) :location(a / around :op1(出口))))'''
     s1 = '''(a  /  and :op1 (c  /  change-01 :ARG0 (i  /  it) :ARG1 (p  /  pattern :mod (d  /  develop-02)) :ARG2 (b  / bad :degree (m  /  more))) :op2 (c2  /  cause-01 :ARG0 i :ARG1 (c3  /  congest-01 :ARG1 (a2  /  around :op1 (e  /  exit :poss i)) :ARG2 (t  /  traffic) :ARG1-of (l2  /  localize-01))) :time (a3  /  already))'''
     s = s.decode('utf8')
     #import pdb 
     #pdb.set_trace()
     amr_ch = AMR.parse_string(s)
-    amr_en = AMR.parse_string(s1)
+    #amr_en = AMR.parse_string(s1)
     
-    print str(amr_en)
+    #print str(amr_en)
     #print amr_en.dfs()
-    print amr_en.to_amr_string()
-    print str(amr_ch)
+    #print amr_en.to_amr_string()
+    print amr_ch
     #print amr_ch.dfs()
     print amr_ch.to_amr_string()
